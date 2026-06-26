@@ -13,6 +13,7 @@ const Notification = require('./models/Notification');
 const Product = require('./models/Product');
 const Order = require('./models/Order');
 const Warranty = require('./models/Warranty');
+const Task = require('./models/Task');
 const auth = require('./middleware/auth');
 
 const app = express();
@@ -38,6 +39,51 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// --- STAFF MANAGEMENT (BOSS ONLY) ---
+app.get('/api/users', auth, async (req, res) => {
+  if (req.user && req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied: Only Boss can manage accounts' });
+  }
+  try {
+    const users = await User.find({}, '-password').sort({ createdAt: -1 });
+    res.json(users);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.post('/api/users', auth, async (req, res) => {
+  if (req.user && req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied: Only Boss can manage accounts' });
+  }
+  try {
+    const { name, email, password, role } = req.body;
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ message: 'Email đã tồn tại' });
+    
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({
+      name,
+      email,
+      password: hashedPassword,
+      role: role || 'staff'
+    });
+    await newUser.save();
+    res.status(201).json({ id: newUser._id, name: newUser.name, email: newUser.email, role: newUser.role });
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.delete('/api/users/:id', auth, async (req, res) => {
+  if (req.user && req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied: Only Boss can manage accounts' });
+  }
+  try {
+    if (req.user.id === req.params.id) {
+      return res.status(400).json({ message: 'Không thể tự xóa tài khoản của chính mình' });
+    }
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Đã xóa tài khoản nhân viên' });
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
 // --- NOTIFICATIONS ---
 app.get('/api/notifications', auth, async (req, res) => {
   try {
@@ -52,6 +98,57 @@ app.post('/api/notifications/read-all', auth, async (req, res) => {
 });
 
 // --- CUSTOMERS ---
+// Helper to simulate Zalo OA (ZNS API) messaging
+async function sendZaloMessage(phone, messageText) {
+  let formattedPhone = (phone || '').trim();
+  if (formattedPhone.startsWith('0')) {
+    formattedPhone = '84' + formattedPhone.slice(1);
+  }
+  console.log(`[Zalo OA API Simulation]`);
+  console.log(`  To: ${formattedPhone} (Original: ${phone})`);
+  console.log(`  Content: "${messageText}"`);
+  console.log(`  Status: Mock Sent Successfully via ZNS (Zalo Notification Service)`);
+  return { status: 'mock_sent', success: true };
+}
+
+// Daily Birthday Sweep Scheduler (checks every 1 hour in background)
+let lastCheckDate = '';
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString();
+    
+    // Check at 08:00 AM once per day
+    if (now.getHours() === 8 && lastCheckDate !== dateStr) {
+      lastCheckDate = dateStr;
+      console.log(`[Auto Scheduler] Initiating daily birthday check...`);
+      const currentDay = now.getDate();
+      const currentMonth = now.getMonth() + 1;
+      
+      const Customer = require('./models/Customer');
+      const Activity = require('./models/Activity');
+      const customers = await Customer.find({ birthday: { $ne: null } });
+      const birthdayCustomers = customers.filter(c => {
+        const bday = new Date(c.birthday);
+        return bday.getDate() === currentDay && (bday.getMonth() + 1) === currentMonth;
+      });
+
+      for (const cust of birthdayCustomers) {
+        const msg = `BOSS Đà Nẵng kính chúc quý khách hàng ${cust.name} một ngày sinh nhật vui vẻ, hạnh phúc, dồi dào sức khỏe và gặt hái nhiều thành công trong tuổi mới! Trân trọng.`;
+        await sendZaloMessage(cust.phone, msg);
+        await new Activity({
+          customerId: cust._id,
+          content: `Hệ thống tự động gửi chúc mừng sinh nhật qua Zalo OA: "${msg}"`,
+          type: 'activity'
+        }).save();
+      }
+      console.log(`[Auto Scheduler] Daily birthday wishes sent to ${birthdayCustomers.length} customers.`);
+    }
+  } catch (err) {
+    console.error("[Auto Scheduler] Birthday check error:", err);
+  }
+}, 3600000); // Check every 1 hour
+
 app.get('/api/customers', auth, async (req, res) => {
   res.json(await Customer.find().sort({ createdAt: -1 }));
 });
@@ -66,6 +163,48 @@ app.post('/api/customers', auth, async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
+app.put('/api/customers/:id', auth, async (req, res) => {
+  try {
+    const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(customer);
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.post('/api/customers/trigger-birthday-wishes', auth, async (req, res) => {
+  try {
+    const today = new Date();
+    const currentDay = today.getDate();
+    const currentMonth = today.getMonth() + 1;
+
+    const customers = await Customer.find({ birthday: { $ne: null } });
+    const birthdayCustomers = customers.filter(c => {
+      const bday = new Date(c.birthday);
+      return bday.getDate() === currentDay && (bday.getMonth() + 1) === currentMonth;
+    });
+
+    const results = [];
+    for (const cust of birthdayCustomers) {
+      const msg = `BOSS Đà Nẵng kính chúc quý khách hàng ${cust.name} một ngày sinh nhật vui vẻ, hạnh phúc, dồi dào sức khỏe và gặt hái nhiều thành công trong tuổi mới! Trân trọng.`;
+      await sendZaloMessage(cust.phone, msg);
+      
+      await new Activity({
+        customerId: cust._id,
+        content: `Hệ thống tự động gửi chúc mừng sinh nhật qua Zalo OA: "${msg}"`,
+        type: 'activity'
+      }).save();
+
+      results.push({ name: cust.name, phone: cust.phone });
+    }
+
+    res.json({
+      success: true,
+      message: `Quét thành công sinh nhật ngày ${currentDay}/${currentMonth}. Đã gửi chúc mừng đến ${birthdayCustomers.length} khách hàng.`,
+      sentCount: birthdayCustomers.length,
+      recipients: results
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 app.delete('/api/customers/:id', auth, async (req, res) => {
   await Customer.findByIdAndDelete(req.params.id);
   res.json({ message: 'Deleted' });
@@ -73,10 +212,26 @@ app.delete('/api/customers/:id', auth, async (req, res) => {
 
 // --- DEALS ---
 app.get('/api/deals', auth, async (req, res) => {
-  res.json(await Deal.find().populate('product'));
+  const deals = await Deal.find().populate('product');
+  if (req.user && req.user.role === 'staff') {
+    const maskedDeals = deals.map(d => {
+      const dealObj = d.toObject();
+      dealObj.value = '***';
+      dealObj.paidAmount = 0;
+      dealObj.expectedRevenue = 0;
+      return dealObj;
+    });
+    return res.json(maskedDeals);
+  }
+  res.json(deals);
 });
 
 app.put('/api/deals/:id', auth, async (req, res) => {
+  if (req.user && req.user.role === 'staff') {
+    delete req.body.value;
+    delete req.body.paidAmount;
+    delete req.body.expectedRevenue;
+  }
   const updated = await Deal.findByIdAndUpdate(req.params.id, req.body, { new: true });
   if (req.body.stage === 'Closed') {
     await new Notification({ title: 'Chốt hợp đồng!', message: `Deal "${updated.title}" đã được chốt thành công.`, type: 'success' }).save();
@@ -121,11 +276,19 @@ app.delete('/api/products/:id', auth, async (req, res) => {
 
 // --- ORDERS ---
 app.get('/api/orders', auth, async (req, res) => {
+  if (req.user && req.user.role === 'staff') {
+    return res.status(403).json({ message: 'Access denied: Staff cannot view orders' });
+  }
   res.json(await Order.find().populate('customerId dealId items.productId').sort({ createdAt: -1 }));
 });
 
 app.post('/api/deals', auth, async (req, res) => {
   try {
+    if (req.user && req.user.role === 'staff') {
+      req.body.value = '0';
+      req.body.paidAmount = 0;
+      req.body.expectedRevenue = 0;
+    }
     const deal = new Deal(req.body);
     res.status(201).json(await deal.save());
   } catch (err) { 
@@ -135,9 +298,22 @@ app.post('/api/deals', auth, async (req, res) => {
 });
 
 app.post('/api/orders', auth, async (req, res) => {
+  if (req.user && req.user.role === 'staff') {
+    return res.status(403).json({ message: 'Access denied: Staff cannot create orders' });
+  }
   try {
     const order = new Order(req.body);
     res.status(201).json(await order.save());
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.delete('/api/orders/:id', auth, async (req, res) => {
+  if (req.user && req.user.role === 'staff') {
+    return res.status(403).json({ message: 'Access denied: Staff cannot delete orders' });
+  }
+  try {
+    await Order.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Deleted' });
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
@@ -162,6 +338,81 @@ app.put('/api/warranties/:id', auth, async (req, res) => {
   } catch (err) {
     res.status(400).json({ message: err.message });
   }
+});
+
+// --- TASKS ---
+app.get('/api/tasks', auth, async (req, res) => {
+  try {
+    const tasks = await Task.find().sort({ createdAt: -1 });
+    res.json(tasks);
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.post('/api/tasks', auth, async (req, res) => {
+  try {
+    const task = new Task(req.body);
+    res.status(201).json(await task.save());
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.put('/api/tasks/:id', auth, async (req, res) => {
+  try {
+    const task = await Task.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(task);
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.post('/api/tasks/:id/execute', auth, async (req, res) => {
+  try {
+    const campaign = await Task.findById(req.params.id);
+    if (!campaign) return res.status(404).json({ message: 'Campaign not found' });
+    
+    // Get all customer phone numbers
+    const allCustomers = await Customer.find({}, 'name phone');
+    const recipients = allCustomers.filter(c => c.phone);
+    
+    // Simulate sending messages (this is where real SMS Gateway / Zalo Cloud Connect API would be hooked up)
+    console.log(`[SMS Campaign] Executing: "${campaign.title}"`);
+    console.log(`[SMS Campaign] Content: "${campaign.message}"`);
+    recipients.forEach(cust => {
+      console.log(`  -> Mock Sent to ${cust.name} (${cust.phone})`);
+    });
+    
+    campaign.done = true;
+    campaign.sentCount = recipients.length;
+    await campaign.save();
+
+    // Create notification
+    await new Notification({ 
+      title: 'Chiến dịch SMS hoàn thành', 
+      message: `Chiến dịch "${campaign.title}" đã gửi thành công tới ${recipients.length} khách hàng.`, 
+      type: 'success' 
+    }).save();
+
+    res.json({
+      success: true,
+      message: 'Campaign executed successfully',
+      sentCount: recipients.length,
+      recipients: recipients.map(r => ({ name: r.name, phone: r.phone }))
+    });
+  } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.delete('/api/tasks/:id', auth, async (req, res) => {
+  try {
+    await Task.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+// --- HEALTH CHECK ---
+app.get('/api/health', async (req, res) => {
+  const dbStatus = mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected';
+  res.json({
+    status: 'ok',
+    db: dbStatus,
+    port: PORT
+  });
 });
 
 app.listen(PORT, () => {
