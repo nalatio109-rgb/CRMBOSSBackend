@@ -24,8 +24,58 @@ const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/crm_db';
 const JWT_SECRET = process.env.JWT_SECRET || 'latio_secret_key_123';
 
+const autoSeed = async () => {
+  try {
+    const productCount = await Product.countDocuments();
+    if (productCount === 0) {
+      console.log('[Auto Seeder] Products collection is empty. Attempting to seed...');
+      const fs = require('fs');
+      const path = require('path');
+      const backupPath = path.join(__dirname, 'default_backup.json');
+      
+      if (fs.existsSync(backupPath)) {
+        const raw = fs.readFileSync(backupPath, 'utf8');
+        const data = JSON.parse(raw);
+        
+        if (data.products && data.products.length > 0) {
+          await Product.insertMany(data.products);
+          console.log(`[Auto Seeder] Successfully seeded ${data.products.length} products.`);
+        }
+        if (data.customers && data.customers.length > 0) {
+          const customerCount = await Customer.countDocuments();
+          if (customerCount === 0) {
+            await Customer.insertMany(data.customers);
+            console.log(`[Auto Seeder] Successfully seeded ${data.customers.length} customers.`);
+          }
+        }
+        if (data.deals && data.deals.length > 0) {
+          const dealCount = await Deal.countDocuments();
+          if (dealCount === 0) {
+            await Deal.insertMany(data.deals);
+            console.log(`[Auto Seeder] Successfully seeded ${data.deals.length} deals.`);
+          }
+        }
+        if (data.orders && data.orders.length > 0) {
+          const orderCount = await Order.countDocuments();
+          if (orderCount === 0) {
+            await Order.insertMany(data.orders);
+            console.log(`[Auto Seeder] Successfully seeded ${data.orders.length} orders.`);
+          }
+        }
+      } else {
+        console.log('[Auto Seeder] default_backup.json not found. Skipping auto-seed.');
+      }
+    }
+  } catch (err) {
+    console.error('[Auto Seeder] Seeding error:', err);
+  }
+};
+
 mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ Connected to MongoDB'))
+  .then(() => {
+    console.log('✅ Connected to MongoDB');
+    autoSeed();
+  })
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // --- AUTH ---
@@ -81,6 +131,20 @@ app.delete('/api/users/:id', auth, async (req, res) => {
     }
     await User.findByIdAndDelete(req.params.id);
     res.json({ message: 'Đã xóa tài khoản nhân viên' });
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.put('/api/users/:id/password', auth, async (req, res) => {
+  if (req.user && req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied: Only Boss can manage accounts' });
+  }
+  try {
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ message: 'Mật khẩu mới không được để trống' });
+    
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await User.findByIdAndUpdate(req.params.id, { password: hashedPassword });
+    res.json({ message: 'Đã cập nhật mật khẩu thành công' });
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
@@ -150,10 +214,16 @@ setInterval(async () => {
 }, 3600000); // Check every 1 hour
 
 app.get('/api/customers', auth, async (req, res) => {
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot view customers' });
+  }
   res.json(await Customer.find().sort({ createdAt: -1 }));
 });
 
 app.post('/api/customers', auth, async (req, res) => {
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot manage customers' });
+  }
   try {
     const customer = new Customer(req.body);
     await customer.save();
@@ -164,6 +234,9 @@ app.post('/api/customers', auth, async (req, res) => {
 });
 
 app.put('/api/customers/:id', auth, async (req, res) => {
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot manage customers' });
+  }
   try {
     const customer = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true });
     res.json(customer);
@@ -171,6 +244,9 @@ app.put('/api/customers/:id', auth, async (req, res) => {
 });
 
 app.post('/api/customers/trigger-birthday-wishes', auth, async (req, res) => {
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot manage customers' });
+  }
   try {
     const today = new Date();
     const currentDay = today.getDate();
@@ -206,23 +282,26 @@ app.post('/api/customers/trigger-birthday-wishes', auth, async (req, res) => {
 });
 
 app.delete('/api/customers/:id', auth, async (req, res) => {
-  await Customer.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Deleted' });
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot manage customers' });
+  }
+  try {
+    const customer = await Customer.findById(req.params.id);
+    if (customer) {
+      await new Notification({
+        title: 'Xóa khách hàng',
+        message: `Khách hàng ${customer.name} (SĐT: ${customer.phone}) đã bị xóa khỏi hệ thống.`,
+        type: 'info'
+      }).save();
+    }
+    await Customer.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 // --- DEALS ---
 app.get('/api/deals', auth, async (req, res) => {
   const deals = await Deal.find().populate('product');
-  if (req.user && req.user.role === 'staff') {
-    const maskedDeals = deals.map(d => {
-      const dealObj = d.toObject();
-      dealObj.value = '***';
-      dealObj.paidAmount = 0;
-      dealObj.expectedRevenue = 0;
-      return dealObj;
-    });
-    return res.json(maskedDeals);
-  }
   res.json(deals);
 });
 
@@ -241,10 +320,16 @@ app.put('/api/deals/:id', auth, async (req, res) => {
 
 // --- ACTIVITIES ---
 app.get('/api/activities/:customerId', auth, async (req, res) => {
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot view customer activities' });
+  }
   res.json(await Activity.find({ customerId: req.params.customerId }).sort({ date: -1 }));
 });
 
 app.post('/api/activities', auth, async (req, res) => {
+  if (req.user && req.user.role === 'accountant') {
+    return res.status(403).json({ message: 'Access denied: Accountant cannot create customer activities' });
+  }
   res.status(201).json(await new Activity(req.body).save());
 });
 
@@ -276,9 +361,6 @@ app.delete('/api/products/:id', auth, async (req, res) => {
 
 // --- ORDERS ---
 app.get('/api/orders', auth, async (req, res) => {
-  if (req.user && req.user.role === 'staff') {
-    return res.status(403).json({ message: 'Access denied: Staff cannot view orders' });
-  }
   res.json(await Order.find().populate('customerId dealId items.productId').sort({ createdAt: -1 }));
 });
 
@@ -298,9 +380,6 @@ app.post('/api/deals', auth, async (req, res) => {
 });
 
 app.post('/api/orders', auth, async (req, res) => {
-  if (req.user && req.user.role === 'staff') {
-    return res.status(403).json({ message: 'Access denied: Staff cannot create orders' });
-  }
   try {
     const order = new Order(req.body);
     res.status(201).json(await order.save());
@@ -312,8 +391,43 @@ app.delete('/api/orders/:id', auth, async (req, res) => {
     return res.status(403).json({ message: 'Access denied: Staff cannot delete orders' });
   }
   try {
+    const order = await Order.findById(req.params.id);
+    if (order) {
+      await new Notification({
+        title: 'Hủy/Xóa đơn hàng',
+        message: `Đơn hàng #${order._id.toString().slice(-6).toUpperCase()} (Tổng tiền: ${(order.totalAmount || 0).toLocaleString('vi-VN')} đ) đã bị xóa khỏi hệ thống.`,
+        type: 'warning'
+      }).save();
+    }
     await Order.findByIdAndDelete(req.params.id);
     res.json({ message: 'Deleted' });
+  } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.put('/api/orders/:id', auth, async (req, res) => {
+  try {
+    const { status, paidAmount } = req.body;
+    const updateData = {};
+    if (status !== undefined) updateData.status = status;
+    if (paidAmount !== undefined) updateData.paidAmount = paidAmount;
+
+    const order = await Order.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    
+    // Log an activity or notification
+    let msg = `Đơn hàng #${order._id.toString().slice(-6).toUpperCase()} đã được cập nhật.`;
+    if (paidAmount !== undefined) {
+      msg = `Đơn hàng #${order._id.toString().slice(-6).toUpperCase()}: Đã thu thêm tiền, tổng lũy kế đã trả: ${(order.paidAmount || 0).toLocaleString('vi-VN')} đ / ${(order.totalAmount || 0).toLocaleString('vi-VN')} đ (Còn nợ: ${Math.max(0, order.totalAmount - (order.paidAmount || 0)).toLocaleString('vi-VN')} đ).`;
+    } else if (status !== undefined) {
+      msg = `Đơn hàng #${order._id.toString().slice(-6).toUpperCase()} chuyển sang trạng thái "${status === 'Paid' ? 'Đã thanh toán' : status === 'Unpaid' ? 'Chờ thanh toán' : status === 'Cancelled' ? 'Đã hủy' : status}".`;
+    }
+
+    await new Notification({
+      title: 'Cập nhật đơn hàng',
+      message: msg,
+      type: 'info'
+    }).save();
+    
+    res.json(order);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
@@ -403,6 +517,39 @@ app.delete('/api/tasks/:id', auth, async (req, res) => {
     await Task.findByIdAndDelete(req.params.id);
     res.json({ message: 'Deleted' });
   } catch (err) { res.status(400).json({ message: err.message }); }
+});
+
+app.post('/api/backup/restore', auth, async (req, res) => {
+  if (req.user && req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied: Only Boss can restore database' });
+  }
+  try {
+    const { customers, deals, products, orders } = req.body;
+    
+    // Clear current database collections
+    if (customers) await Customer.deleteMany({});
+    if (deals) await Deal.deleteMany({});
+    if (products) await Product.deleteMany({});
+    if (orders) await Order.deleteMany({});
+    
+    // Insert new documents
+    if (customers && customers.length > 0) await Customer.insertMany(customers);
+    if (deals && deals.length > 0) await Deal.insertMany(deals);
+    if (products && products.length > 0) await Product.insertMany(products);
+    if (orders && orders.length > 0) await Order.insertMany(orders);
+    
+    // Create a notification about database restore
+    await new Notification({
+      title: 'Khôi phục dữ liệu',
+      message: `Hệ thống vừa khôi phục cơ sở dữ liệu thành công từ file sao lưu.`,
+      type: 'warning'
+    }).save();
+    
+    res.json({ success: true, message: 'Khôi phục dữ liệu thành công!' });
+  } catch (err) {
+    console.error('Restore Error:', err);
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // --- HEALTH CHECK ---
