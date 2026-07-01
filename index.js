@@ -306,11 +306,7 @@ app.get('/api/deals', auth, async (req, res) => {
 });
 
 app.put('/api/deals/:id', auth, async (req, res) => {
-  if (req.user && req.user.role === 'staff') {
-    delete req.body.value;
-    delete req.body.paidAmount;
-    delete req.body.expectedRevenue;
-  }
+
   const updated = await Deal.findByIdAndUpdate(req.params.id, req.body, { new: true });
   if (req.body.stage === 'Closed') {
     await new Notification({ title: 'Chốt hợp đồng!', message: `Deal "${updated.title}" đã được chốt thành công.`, type: 'success' }).save();
@@ -366,11 +362,7 @@ app.get('/api/orders', auth, async (req, res) => {
 
 app.post('/api/deals', auth, async (req, res) => {
   try {
-    if (req.user && req.user.role === 'staff') {
-      req.body.value = '0';
-      req.body.paidAmount = 0;
-      req.body.expectedRevenue = 0;
-    }
+
     const deal = new Deal(req.body);
     res.status(201).json(await deal.save());
   } catch (err) { 
